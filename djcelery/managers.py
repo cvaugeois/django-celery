@@ -72,7 +72,10 @@ class ExtendedQuerySet(QuerySet):
 class ExtendedManager(models.Manager):
 
     def get_query_set(self):
-        return ExtendedQuerySet(self.model)
+        try:
+            return ExtendedQuerySet(self.model)
+        except:
+            print "it broke"
 
     def update_or_create(self, **kwargs):
         return self.get_query_set().update_or_create(**kwargs)
