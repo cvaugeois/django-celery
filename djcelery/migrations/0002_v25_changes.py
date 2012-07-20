@@ -6,13 +6,20 @@ from south.v2 import SchemaMigration
 from django.db import models
 from django.db.utils import DatabaseError
 
+try:
+    from _mysql_exceptions import OperationalError
+except ImportError:
+    class OperationalError(Exception):
+        pass
+
+
 def ignore_exists(fun, *args, **kwargs):
     try:
         fun(*args, **kwargs)
-    except DatabaseError, exc:
+    except (DatabaseError, OperationalError), exc:
         if "exists" in str(exc):
             # don't panic, everything is ok: it's just a hack
-            if db.has_ddl_transactions:
+            if getattr(db, 'has_ddl_transactions', False):
                 db.rollback_transaction()
                 db.start_transaction()
             return False
