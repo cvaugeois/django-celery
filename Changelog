@@ -5,6 +5,155 @@
 .. contents::
     :local:
 
+.. _version-3.0.11:
+
+3.0.11
+======
+:release-date: 2012-10-10 02:30 P.M BST
+
+- Now depends on celery 3.0.11.
+
+- Now depends on :mod:`pytz`
+
+- Fixed Django Admin monitor timezone problem.
+
+    Events still use timestamps that converts to the timezone of the receiving
+    node, but a proper fix is being worked on that will be part of Celery 3.1
+
+- Fixed error in database close mechanism for Oracle.
+
+    Fix contributed by Dan LaMotte.
+
+
+3.0.10
+======
+:release-date: 2012-09-21 10:29 A.M BST
+
+- Now depends on Celery 3.0.10
+
+- Fixed timezone issues when using the Database periodic task scheduler.
+
+- Admin: Periodic task form now adds tasks imported using ``CELERY_IMPORTS``,
+  and ``CELERY_INCLUDE``.
+
+- Memory leak warning is now only output once.
+
+- Periodic task form in Admin no longer lists the celery built-in tasks.
+
+.. _version-3.0.9:
+
+3.0.9
+=====
+:release-date: 2012-08-31 06:00 P.M BST
+
+Important note:
+
+Celery 3.0.9 fixes an issue with periodic tasks and timezones.
+
+If you are using the database periodic task scheduler
+then you have to reset the `last_run_at` fields
+to ensure that no invalid timezones are stored:
+
+.. code-block:: bash
+
+    $ python manage.py shell
+    >>> from djcelery.models import PeriodicTask
+    >>> PeriodicTask.objects.update(last_run_at=None)
+
+- Now depends on Celery 3.0.9
+
+    See the Celery changelog for more information:
+
+        http://docs.celeryproject.org/en/latest/changelog.html
+
+- Don't close fds for database connections without a fileno.
+
+- Fixes Oracle compatibility issue for closing an already
+  closed connection.
+
+    Fix contributed by Dan LaMotte.
+
+- New test suite runner that stores results in the database:
+  :class:`djcelery.contrib.test_runner.CeleryTestSuiteRunnerStoringResult`.
+
+    Contributed by Kirill Panshin.
+
+.. _version-3.0.6:
+
+3.0.6
+=====
+:release-date: 2012-08-17 11:00 P.M BST
+
+- Now depends on celery 3.0.6
+
+- Naive datetime's received by Celery are now assumed to be UTC.
+
+- The example demoproject no longer used ``djcelery.setup_loader``.
+
+- Fixed south migration warning (Issue #149).
+
+    Fix contributed by Roman Imankulov.
+
+- No longer uses deprecated urls module.
+
+    Fix contributed by Simon Charette.
+
+- Databases are no longer closed after fork, instead we close
+  the underlying file descriptors, so parent process can continue
+  to use the connection (Issue #161).
+
+    Fix contributed by Alex Stapleton.
+
+.. _version-3.0.4:
+
+3.0.4
+=====
+:release-date: 2012-07-26 07:00 P.M BST
+:by: Ask Solem
+
+- Now depends on celery 3.0.4
+
+- ``CELERY_ENABLE_UTC`` is now disabled for Django versions
+  before 1.4 (Issue #158).
+
+- celerycam: No longer overwrites name, args, kwargs and eta if the
+  received event is missing (Issue #148 + Issue #155).
+
+    Fix contributed by Kirill Panshin.
+
+- Fixed problem with migrations when running the tests.
+
+    Fix contributed by Roger Barnes.
+
+- New utilities:
+
+    - :func:`djcelery.common.respect_language`
+
+        Context manager for the with statement that changes the language used.
+        For example::
+
+            from celery import task
+            from djcelery.common import respect_language
+
+            @task
+            def my_task(language=None):
+                with respect_language(language):
+                    ...
+
+    - :func:`djcelery.common.respects_language`
+
+        Decorator version of the above that adds a ``language`` keyword
+        argument to any function that it decorates::
+
+            @task
+            @respects_language
+            def my_task():
+                pass
+
+            my_task.delay(language=translation.get_language())
+
+    Contributed by @ramusus
+
 .. _version-3.0.1:
 
 3.0.1
@@ -27,6 +176,7 @@ the tables or alter the tables manually::
 
         ALTER TABLE djcelery_crontabschedule
             ADD month_of_year VARCHAR(64) NOT NULL DEFAULT "*";
+
 Fixes
 -----
 
@@ -115,13 +265,6 @@ News
 
     Contributed by Diego Andres Sanabria Martin.
 
-- The Django database transport is now available from the djcelery namespace.
-
-    Instead of ``kombu.transport.django`` you can now add
-    ``djcelery.transport`` to ``INSTALLED_APPS``::
-
-        INSTALLED_APPS = ('djcelery.transport', )
-
 .. _v300-fixes:
 
 Fixes
@@ -174,13 +317,19 @@ Fixes
 :release-date: 2012-04-13 05:00 P.M BST
 :by: Ask Solem
 
-.. _v251-news:
+.. _v252-news:
+
+News
+----
 
 * PeriodicTask admin now lists the enabled field in the list view
 
     Contributed by Gabe Jackson.
 
-.. _v251-fixes:
+.. _v252-fixes:
+
+Fixes
+-----
 
 * Fixed a compatibility issue with Django < 1.3
 

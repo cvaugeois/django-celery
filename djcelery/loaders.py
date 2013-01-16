@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import os
 import imp
 import importlib
 import warnings
@@ -10,6 +11,7 @@ from celery import signals
 from celery.loaders.base import BaseLoader
 from celery.datastructures import DictAttribute
 
+import django
 from django import db
 from django.conf import settings
 from django.core import cache
@@ -18,6 +20,15 @@ from django.core.mail import mail_admins
 from .utils import DATABASE_ERRORS, now
 
 _RACE_PROTECTION = False
+NO_TZ = django.VERSION < (1, 4)
+
+
+def _maybe_close_fd(fh):
+    try:
+        os.close(fh.fileno())
+    except (AttributeError, OSError, TypeError):
+        # TypeError added for celery#962
+        pass
 
 
 class DjangoLoader(BaseLoader):
@@ -36,6 +47,7 @@ class DjangoLoader(BaseLoader):
         # Need to close any open database connection after
         # any embedded celerybeat process forks.
         signals.beat_embedded_init.connect(self.close_database)
+        signals.worker_ready.connect(self.warn_if_debug)
 
     def now(self, utc=False):
         return datetime.utcnow() if utc else now()
@@ -49,6 +61,10 @@ class DjangoLoader(BaseLoader):
                     getattr(settings, "CELERY_BACKEND", None)
         if not backend:
             settings.CELERY_RESULT_BACKEND = "database"
+        if NO_TZ:
+            if getattr(settings, "CELERY_ENABLE_UTC", None):
+                warnings.warn("CELERY_ENABLE_UTC requires Django 1.4+")
+            settings.CELERY_ENABLE_UTC = False
         return DictAttribute(settings)
 
     def _close_database(self):
@@ -61,7 +77,8 @@ class DjangoLoader(BaseLoader):
             try:
                 close()
             except DATABASE_ERRORS, exc:
-                if "closed" not in str(exc):
+                str_exc = str(exc)
+                if "closed" not in str_exc and "not connected" not in str_exc:
                     raise
 
     def close_database(self, **kwargs):
@@ -105,14 +122,15 @@ class DjangoLoader(BaseLoader):
         listed in ``INSTALLED_APPS``.
 
         """
-
-        if settings.DEBUG:
-            warnings.warn("Using settings.DEBUG leads to a memory leak, never "
-                          "use this setting in production environments!")
         self.import_default_modules()
 
         self.close_database()
         self.close_cache()
+
+    def warn_if_debug(self, **kwargs):
+        if settings.DEBUG:
+            warnings.warn("Using settings.DEBUG leads to a memory leak, never "
+                          "use this setting in production environments!")
 
     def import_default_modules(self):
         super(DjangoLoader, self).import_default_modules()
@@ -124,7 +142,21 @@ class DjangoLoader(BaseLoader):
     def on_worker_process_init(self):
         # the parent process may have established these,
         # so need to close them.
-        self.close_database()
+
+        # calling db.close() on some DB connections will cause
+        # the inherited DB conn to also get broken in the parent
+        # process so we need to remove it without triggering any
+        # network IO that close() might cause.
+        try:
+            for c in db.connections.all():
+                if c and c.connection:
+                    _maybe_close_fd(c.connection)
+        except AttributeError:
+            if db.connection and db.connection.connection:
+                _maybe_close_fd(db.connection.connection)
+
+        # use the _ version to avoid DB_REUSE preventing the conn.close() call
+        self._close_database()
         self.close_cache()
 
     def mail_admins(self, subject, body, fail_silently=False, **kwargs):

@@ -5,9 +5,11 @@ import logging
 from warnings import warn
 
 from anyjson import deserialize, serialize
+from celery import current_app
 from celery import schedules
 from celery.beat import Scheduler, ScheduleEntry
 from celery.utils.encoding import safe_str, safe_repr
+from celery.utils.timeutils import is_naive
 from kombu.utils.finalize import Finalize
 
 from django.db import transaction
@@ -15,7 +17,7 @@ from django.core.exceptions import ObjectDoesNotExist
 
 from .models import (PeriodicTask, PeriodicTasks,
                      CrontabSchedule, IntervalSchedule)
-from .utils import DATABASE_ERRORS, now
+from .utils import DATABASE_ERRORS, make_aware
 
 # This scheduler must wake up more frequently than the
 # regular of 5 minutes because it needs to take external
@@ -29,6 +31,7 @@ class ModelEntry(ScheduleEntry):
     save_fields = ["last_run_at", "total_run_count", "no_changes"]
 
     def __init__(self, model):
+        self.app = current_app._get_current_object()
         self.name = model.name
         self.task = model.task
         self.schedule = model.schedule
@@ -51,7 +54,10 @@ class ModelEntry(ScheduleEntry):
 
         if not model.last_run_at:
             model.last_run_at = self._default_now()
-        self.last_run_at = model.last_run_at
+        orig = self.last_run_at = model.last_run_at
+        if not is_naive(self.last_run_at):
+            self.last_run_at = self.last_run_at.replace(tzinfo=None)
+        assert orig.hour == self.last_run_at.hour  # timezone sanity
 
     def is_due(self):
         if not self.model.enabled:
@@ -59,10 +65,10 @@ class ModelEntry(ScheduleEntry):
         return self.schedule.is_due(self.last_run_at)
 
     def _default_now(self):
-        return now()
+        return self.app.now()
 
     def next(self):
-        self.model.last_run_at = now()
+        self.model.last_run_at = self.app.now()
         self.model.total_run_count += 1
         self.model.no_changes = True
         return self.__class__(self.model)
@@ -74,6 +80,7 @@ class ModelEntry(ScheduleEntry):
         obj = self.model._default_manager.get(pk=self.model.pk)
         for field in self.save_fields:
             setattr(obj, field, getattr(self.model, field))
+        obj.last_run_at = make_aware(obj.last_run_at)
         obj.save()
 
     @classmethod
@@ -117,6 +124,7 @@ class DatabaseScheduler(Scheduler):
     Changes = PeriodicTasks
     _schedule = None
     _last_timestamp = None
+    _initial_read = False
 
     def __init__(self, *args, **kwargs):
         self._dirty = set()
@@ -141,25 +149,26 @@ class DatabaseScheduler(Scheduler):
         return s
 
     def schedule_changed(self):
-        if self._last_timestamp is not None:
+        try:
+            # If MySQL is running with transaction isolation level
+            # REPEATABLE-READ (default), then we won't see changes done by
+            # other transactions until the current transaction is
+            # committed (Issue #41).
             try:
-                # If MySQL is running with transaction isolation level
-                # REPEATABLE-READ (default), then we won't see changes done by
-                # other transactions until the current transaction is
-                # committed (Issue #41).
-                try:
-                    transaction.commit()
-                except transaction.TransactionManagementError:
-                    pass  # not in transaction management.
+                transaction.commit()
+            except transaction.TransactionManagementError:
+                pass  # not in transaction management.
 
-                ts = self.Changes.last_change()
-                if not ts or ts < self._last_timestamp:
-                    return False
-            except DATABASE_ERRORS, exc:
-                warn(RuntimeWarning("Database gave error: %r" % (exc, )))
-                return False
-        self._last_timestamp = now()
-        return True
+            last, ts = self._last_timestamp, self.Changes.last_change()
+        except DATABASE_ERRORS, exc:
+            warn(RuntimeWarning("Database gave error: %r" % (exc, )))
+            return False
+        try:
+            if ts and ts > (last if last else ts):
+                return True
+        finally:
+            self._last_timestamp = ts
+        return False
 
     def reserve(self, entry):
         new_entry = Scheduler.reserve(self, entry)
@@ -170,7 +179,7 @@ class DatabaseScheduler(Scheduler):
 
     @transaction.commit_manually
     def sync(self):
-        self.logger.debug("Writing dirty entries...")
+        self.logger.info("Writing entries...")
         _tried = set()
         try:
             try:
@@ -207,15 +216,23 @@ class DatabaseScheduler(Scheduler):
         if self.app.conf.CELERY_TASK_RESULT_EXPIRES:
             entries.setdefault("celery.backend_cleanup", {
                     "task": "celery.backend_cleanup",
-                    "schedule": schedules.crontab("0", "4", "*", nowfun=now),
+                    "schedule": schedules.crontab("0", "4", "*"),
                     "options": {"expires": 12 * 3600}})
         self.update_from_dict(entries)
 
     @property
     def schedule(self):
-        if self.schedule_changed():
+        update = False
+        if not self._initial_read:
+            self.logger.debug('DatabaseScheduler: intial read')
+            update = True
+            self._initial_read = True
+        elif self.schedule_changed():
+            self.logger.info("DatabaseScheduler: Schedule changed.")
+            update = True
+
+        if update:
             self.sync()
-            self.logger.debug("DatabaseScheduler: Schedule changed.")
             self._schedule = self.all_as_schedule()
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
